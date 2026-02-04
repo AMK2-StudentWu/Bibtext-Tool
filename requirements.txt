@@ -1,2 +1,6 @@
+
 streamlit
 arxiv
+requests
+rapidfuzz
+streamlit-autorefresh
