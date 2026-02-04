@@ -878,4 +878,4 @@ if run_now:
                     st.error(r.message or "转换失败")
 
 st.markdown("---")
-st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（不抓取 Google Scholar 页面）")
+st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（吴老二还在测试，目前不抓取 Google Scholar 页面）")
