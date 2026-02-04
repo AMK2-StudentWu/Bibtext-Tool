@@ -131,6 +131,196 @@ def make_key(authors: List[str], year: Optional[int], title: str) -> str:
     return f"{last}{y}{first}"
 
 
+
+
+# ==========================
+# RIS helpers & converters
+# ==========================
+
+def ris_escape(s: str) -> str:
+    """Minimal escaping for RIS (single-line values)."""
+    if s is None:
+        return ""
+    s = str(s).replace("\r", " ").replace("\n", " ").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _ris_line(tag: str, value: str) -> str:
+    value = ris_escape(value)
+    if not value:
+        return ""
+    return f"{tag}  - {value}"
+
+
+def _name_to_ris_author(name: str) -> str:
+    """Convert 'First Last' -> 'Last, First' when possible."""
+    name = (name or "").strip()
+    if not name:
+        return ""
+    if "," in name:
+        return name
+    parts = [p for p in name.split() if p]
+    if len(parts) >= 2:
+        last = parts[-1]
+        given = " ".join(parts[:-1])
+        return f"{last}, {given}"
+    return name
+
+
+def _split_pages(pages: str) -> Tuple[Optional[str], Optional[str]]:
+    if not pages:
+        return None, None
+    p = pages.strip().replace("–", "-").replace("--", "-")
+    if "-" in p:
+        a, b = p.split("-", 1)
+        a, b = a.strip(), b.strip()
+        return (a or None), (b or None)
+    return (p.strip() or None), None
+
+
+def arxiv_doi(arxiv_id: str) -> str:
+    """arXiv DataCite DOI (best-effort). e.g. 10.48550/arXiv.2110.14051"""
+    if not arxiv_id:
+        return ""
+    base = arxiv_id.split("v", 1)[0]  # drop version
+    return f"10.48550/arXiv.{base}"
+
+
+def format_arxiv_to_ris(r: arxiv.Result) -> str:
+    arxiv_id = r.get_short_id()
+    year = r.published.year if r.published else None
+    da = ""
+    if r.published:
+        da = r.published.strftime("%Y/%m/%d")
+    primary = getattr(r, "primary_category", None) or ""
+    authors = [_name_to_ris_author(a.name) for a in r.authors]
+    lines = []
+    lines.append(_ris_line("TY", "RPRT"))  # report / preprint
+    lines.append(_ris_line("TI", r.title))
+    for a in authors:
+        ln = _ris_line("AU", a)
+        if ln:
+            lines.append(ln)
+    if year:
+        lines.append(_ris_line("PY", str(year)))
+    if da:
+        lines.append(_ris_line("DA", da))
+    lines.append(_ris_line("JO", "arXiv"))
+    lines.append(_ris_line("T2", f"arXiv:{arxiv_id}"))
+    if primary:
+        lines.append(_ris_line("KW", primary))
+    lines.append(_ris_line("DO", arxiv_doi(arxiv_id)))
+    lines.append(_ris_line("UR", r.entry_id))
+    lines.append("ER  -")
+    return "\n".join([ln for ln in lines if ln])
+
+
+CROSSREF_TYPE_TO_RIS = {
+    "journal-article": "JOUR",
+    "journal-issue": "JOUR",
+    "proceedings-article": "CONF",
+    "conference-paper": "CONF",
+    "book-chapter": "CHAP",
+    "book-section": "CHAP",
+    "book": "BOOK",
+    "monograph": "BOOK",
+    "report": "RPRT",
+    "posted-content": "RPRT",  # preprint / posted content
+    "dissertation": "THES",
+    "thesis": "THES",
+}
+
+
+def _crossref_best_date(m: Dict) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    for key in ("issued", "created", "published-print", "published-online"):
+        dp = ((m.get(key) or {}).get("date-parts") or [])
+        if dp and dp[0]:
+            parts = dp[0]
+            y = int(parts[0]) if len(parts) >= 1 and parts[0] else None
+            mo = int(parts[1]) if len(parts) >= 2 and parts[1] else None
+            d = int(parts[2]) if len(parts) >= 3 and parts[2] else None
+            return y, mo, d
+    return None, None, None
+
+
+def ris_from_crossref(m: Dict) -> str:
+    title_list = m.get("title") or []
+    title = title_list[0] if title_list else ""
+    ct = m.get("container-title") or []
+    container = ct[0] if ct else ""
+    typ = (m.get("type") or "").strip()
+    ris_ty = CROSSREF_TYPE_TO_RIS.get(typ, "GEN")
+
+    doi = (m.get("DOI") or "").strip()
+    url = (m.get("URL") or "").strip()
+    volume = (m.get("volume") or "").strip()
+    number = (m.get("issue") or "").strip()
+    pages = (m.get("page") or "").strip()
+    publisher = (m.get("publisher") or "").strip()
+
+    sp, ep = _split_pages(pages)
+
+    # authors
+    aus = []
+    for a in (m.get("author") or []):
+        family = (a.get("family") or "").strip()
+        given = (a.get("given") or "").strip()
+        if family and given:
+            aus.append(f"{family}, {given}")
+        else:
+            name = (a.get("name") or "").strip()
+            if name:
+                aus.append(name)
+
+    y, mo, d = _crossref_best_date(m)
+    da = ""
+    if y and mo and d:
+        da = f"{y:04d}/{mo:02d}/{d:02d}"
+    elif y and mo:
+        da = f"{y:04d}/{mo:02d}"
+    elif y:
+        da = f"{y:04d}"
+
+    lines = []
+    lines.append(_ris_line("TY", ris_ty))
+    lines.append(_ris_line("TI", title))
+    for a in aus:
+        ln = _ris_line("AU", a)
+        if ln:
+            lines.append(ln)
+    if y:
+        lines.append(_ris_line("PY", str(y)))
+    if da:
+        lines.append(_ris_line("DA", da))
+
+    if ris_ty == "JOUR":
+        if container:
+            lines.append(_ris_line("JO", container))
+            lines.append(_ris_line("JF", container))
+        if volume:
+            lines.append(_ris_line("VL", volume))
+        if number:
+            lines.append(_ris_line("IS", number))
+    else:
+        if container:
+            # secondary title / proceedings / booktitle
+            lines.append(_ris_line("T2", container))
+        if publisher:
+            lines.append(_ris_line("PB", publisher))
+
+    if sp:
+        lines.append(_ris_line("SP", sp))
+    if ep:
+        lines.append(_ris_line("EP", ep))
+    if doi:
+        lines.append(_ris_line("DO", doi))
+    if url:
+        lines.append(_ris_line("UR", url))
+
+    lines.append("ER  -")
+    return "\n".join([ln for ln in lines if ln])
+
 @dataclass
 class BibResult:
     raw: str
@@ -138,6 +328,7 @@ class BibResult:
     source: str
     matched_title: Optional[str]
     bibtex: Optional[str]
+    ris: Optional[str]
     message: Optional[str] = None
 
 
@@ -428,7 +619,7 @@ def best_title_match_from_candidates(
 def resolve_one(raw: str, threshold: int) -> BibResult:
     text = (raw or "").strip()
     if not text:
-        return BibResult(raw=raw, ok=False, source="", matched_title=None, bibtex=None, message="空输入")
+        return BibResult(raw=raw, ok=False, source="", matched_title=None, bibtex=None, ris=None, message="空输入")
 
     doi = extract_doi(text)
     arxiv_id = extract_arxiv_id(text)
@@ -440,16 +631,17 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
         if m:
             try:
                 bib = bibtex_from_crossref(m)
+                ris = ris_from_crossref(m)
                 t = ((m.get("title") or [""])[0] if m.get("title") else None)
-                return BibResult(raw=raw, ok=True, source="DOI/Crossref", matched_title=t, bibtex=bib)
+                return BibResult(raw=raw, ok=True, source="DOI/Crossref", matched_title=t, bibtex=bib, ris=ris)
             except Exception as e:
-                return BibResult(raw=raw, ok=False, source="DOI/Crossref", matched_title=None, bibtex=None, message=str(e))
+                return BibResult(raw=raw, ok=False, source="DOI/Crossref", matched_title=None, bibtex=None, ris=None, message=str(e))
 
     # 2) arXiv ID -> arXiv
     if arxiv_id:
         r = arxiv_by_id(arxiv_id)
         if r:
-            return BibResult(raw=raw, ok=True, source="arXiv", matched_title=r.title, bibtex=format_arxiv_to_bibtex(r))
+            return BibResult(raw=raw, ok=True, source="arXiv", matched_title=r.title, bibtex=format_arxiv_to_bibtex(r), ris=format_arxiv_to_ris(r))
 
     # 3) Try arXiv title matching (high precision)
     if title:
@@ -461,6 +653,7 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
                 source=f"arXiv(标题匹配, score={score})",
                 matched_title=r.title,
                 bibtex=format_arxiv_to_bibtex(r),
+                ris=format_arxiv_to_ris(r),
             )
 
     # 4) Semantic Scholar -> (prefer DOI/arXiv)
@@ -481,6 +674,7 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
                         source=f"SemanticScholar→arXiv(score={score})",
                         matched_title=r.title,
                         bibtex=format_arxiv_to_bibtex(r),
+                        ris=format_arxiv_to_ris(r),
                     )
             if doi2:
                 m = crossref_work(doi2)
@@ -491,6 +685,7 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
                         source=f"SemanticScholar→DOI/Crossref(score={score})",
                         matched_title=((m.get("title") or [""])[0] if m.get("title") else None),
                         bibtex=bibtex_from_crossref(m),
+                        ris=ris_from_crossref(m),
                     )
 
     # 5) OpenAlex -> (prefer DOI)
@@ -510,6 +705,7 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
                         source=f"OpenAlex→DOI/Crossref(score={score})",
                         matched_title=((m.get("title") or [""])[0] if m.get("title") else None),
                         bibtex=bibtex_from_crossref(m),
+                        ris=ris_from_crossref(m),
                     )
 
     # 6) Crossref title search as last resort
@@ -525,6 +721,7 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
                     source=f"Crossref(标题匹配, score={score})",
                     matched_title=((m.get("title") or [""])[0] if m.get("title") else None),
                     bibtex=bibtex_from_crossref(m),
+                    ris=ris_from_crossref(m),
                 )
 
     return BibResult(
@@ -533,6 +730,7 @@ def resolve_one(raw: str, threshold: int) -> BibResult:
         source="",
         matched_title=None,
         bibtex=None,
+        ris=None,
         message="没有可靠匹配。建议：直接粘贴 DOI / arXiv ID，或给更完整标题。",
     )
 
@@ -578,7 +776,7 @@ st.markdown(
 
 **检索顺序：** DOI(Crossref) → arXiv → arXiv标题匹配 → Semantic Scholar → OpenAlex → Crossref标题兜底。
 
-**tip：**
+**小技巧：**
 - 直接贴 **DOI** 或 **arXiv ID** 最稳。
 - 只用标题时，建议越完整越好（不要只截一半）。
 """
@@ -587,6 +785,7 @@ st.markdown(
 with st.sidebar:
     st.header("设置")
     threshold = st.slider("标题匹配阈值（越高越严格）", min_value=60, max_value=95, value=85, step=1)
+    export_fmt = st.radio("导出格式", ["BibTeX (.bib)", "RIS (.ris)"], horizontal=True)
     realtime = st.toggle("实时模式（输入停顿后自动检索）", value=False)
     st.caption("提示：实时模式会更频繁调用外部接口。")
 
@@ -640,10 +839,19 @@ if run_now:
         with st.spinner("正在检索…"):
             results = [resolve_one(e, threshold=threshold) for e in entries]
 
-        ok_bibs = [r.bibtex for r in results if r.ok and r.bibtex]
-        if ok_bibs:
-            st.subheader("✅ 汇总 BibTeX")
-            st.code("\n\n".join(ok_bibs), language="latex")
+        is_ris = export_fmt.startswith("RIS")
+        ok_out = [ (r.ris if is_ris else r.bibtex) for r in results if r.ok and (r.ris if is_ris else r.bibtex) ]
+        if ok_out:
+            title = "✅ 汇总 RIS" if is_ris else "✅ 汇总 BibTeX"
+            st.subheader(title)
+            merged = "\n\n".join(ok_out)
+            st.code(merged, language=("text" if is_ris else "latex"))
+            st.download_button(
+                "下载引用文件",
+                data=merged,
+                file_name=("references.ris" if is_ris else "references.bib"),
+                mime=("application/x-research-info-systems" if is_ris else "application/x-bibtex"),
+            )
 
         st.subheader("逐条结果")
         for i, r in enumerate(results, start=1):
@@ -654,10 +862,20 @@ if run_now:
                 st.markdown(f"**输入：** {r.raw}")
                 if r.source:
                     st.markdown(f"**来源：** {r.source}")
-                if r.ok and r.bibtex:
-                    st.code(r.bibtex, language="latex")
+                if r.ok and (r.bibtex or r.ris):
+                    tab_bib, tab_ris = st.tabs(["BibTeX", "RIS"])
+                    with tab_bib:
+                        if r.bibtex:
+                            st.code(r.bibtex, language="latex")
+                        else:
+                            st.info("该条目暂未生成 BibTeX。")
+                    with tab_ris:
+                        if r.ris:
+                            st.code(r.ris, language="text")
+                        else:
+                            st.info("该条目暂未生成 RIS。")
                 else:
                     st.error(r.message or "转换失败")
 
 st.markdown("---")
-st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（吴老二还在测试，希望多提建议。Google Scholar不让检索）")
+st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（不抓取 Google Scholar 页面）")
