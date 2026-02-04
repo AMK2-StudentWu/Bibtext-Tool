@@ -578,7 +578,7 @@ st.markdown(
 
 **检索顺序：** DOI(Crossref) → arXiv → arXiv标题匹配 → Semantic Scholar → OpenAlex → Crossref标题兜底。
 
-**小技巧：**
+**tip：**
 - 直接贴 **DOI** 或 **arXiv ID** 最稳。
 - 只用标题时，建议越完整越好（不要只截一半）。
 """
@@ -660,4 +660,4 @@ if run_now:
                     st.error(r.message or "转换失败")
 
 st.markdown("---")
-st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（不抓取 Google Scholar 页面）")
+st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（吴老二还在测试，希望多提建议。Google Scholar不让检索）")
