@@ -769,7 +769,7 @@ def split_entries(raw: str) -> List[str]:
 
 st.set_page_config(page_title="BibTeX Converter", page_icon="📚", layout="centered")
 
-st.title("📚 BibTeX 自动转换工具")
+st.title("📚 BibTeX/RIS 自动转换工具")
 st.markdown(
     """
 **支持输入：** DOI / arXiv ID / arXiv 链接 / 论文标题 / 一段参考文献。
