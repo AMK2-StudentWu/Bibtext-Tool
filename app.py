@@ -581,7 +581,10 @@ def best_crossref_match(title: str, threshold: int) -> Tuple[Optional[Dict], int
         t = ((it.get("title") or [""])[0] if it.get("title") else "")
         if not t:
             continue
-        score = fuzz.token_set_ratio(nt, _norm(t))
+        c = _norm(t)
+        score_sort = fuzz.token_sort_ratio(nt, c)
+        score_set = fuzz.token_set_ratio(nt, c)
+        score = int(round(0.7 * score_sort + 0.3 * score_set))
         if score > best_score:
             best, best_score = it, score
     if best and best_score >= threshold:
@@ -648,24 +651,41 @@ def openalex_search(title: str, rows: int = 8) -> List[Dict]:
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
 def semanticscholar_search(title: str, limit: int = 8) -> List[Dict]:
     """Semantic Scholar relevance search by title/keywords."""
-    try:
-        r = requests.get(
-            f"{SS_BASE}/paper/search",
-            params={
-                "query": title,
-                "limit": limit,
-                # Ask for paperId so we can fetch full details later.
-                "fields": "paperId,title,year,authors,venue,externalIds,url,publicationTypes,publicationDate,journal",
-            },
-            headers=_ss_headers(),
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return []
-        data = r.json() or {}
-        return data.get("data") or []
-    except Exception:
+    title = (title or "").strip()
+    if not title:
         return []
+    url = f"{SS_BASE}/paper/search"
+    params = {
+        "query": title,
+        "limit": limit,
+        # Ask for paperId so we can fetch full details later.
+        "fields": "paperId,title,year,authors,venue,externalIds,url,publicationTypes,publicationDate,journal",
+    }
+    headers = _ss_headers()
+    last_status = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            last_status = r.status_code
+            st.session_state["ss_last_status"] = last_status
+            if r.status_code == 200:
+                data = r.json() or {}
+                return data.get("data") or []
+            # retry on rate limit / transient errors
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                ra = r.headers.get("Retry-After")
+                wait = int(ra) if (ra and str(ra).isdigit()) else 1
+                time.sleep(min(3, max(1, wait)))
+                continue
+            return []
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.8)
+                continue
+            st.session_state["ss_last_status"] = last_status or -1
+            return []
+    return []
+
 
 
 @st.cache_data(show_spinner=False, ttl=7 * 24 * 3600)
@@ -674,20 +694,32 @@ def semanticscholar_paper(paper_id: str) -> Optional[Dict]:
     paper_id = (paper_id or "").strip()
     if not paper_id:
         return None
-    try:
-        r = requests.get(
-            f"{SS_BASE}/paper/{paper_id}",
-            params={
-                "fields": "paperId,corpusId,url,title,year,authors,venue,publicationVenue,externalIds,publicationTypes,publicationDate,journal,citationStyles"
-            },
-            headers=_ss_headers(),
-            timeout=15,
-        )
-        if r.status_code != 200:
+    url = f"{SS_BASE}/paper/{paper_id}"
+    params = {
+        "fields": "paperId,corpusId,url,title,year,authors,venue,publicationVenue,externalIds,publicationTypes,publicationDate,journal,citationStyles"
+    }
+    headers = _ss_headers()
+    last_status = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            last_status = r.status_code
+            st.session_state["ss_last_status"] = last_status
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                ra = r.headers.get("Retry-After")
+                wait = int(ra) if (ra and str(ra).isdigit()) else 1
+                time.sleep(min(3, max(1, wait)))
+                continue
             return None
-        return r.json()
-    except Exception:
-        return None
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.8)
+                continue
+            st.session_state["ss_last_status"] = last_status or -1
+            return None
+    return None
 
 
 PREPRINT_VENUES = {
@@ -799,10 +831,18 @@ def ris_from_s2_minimal(paper: Dict) -> Optional[str]:
 def best_title_match_from_candidates(
     title: str, candidates: List[Tuple[str, Dict]], threshold: int
 ) -> Tuple[Optional[Dict], int]:
+    """Pick the best candidate by fuzzy title matching.
+
+    We intentionally avoid relying only on token_set_ratio (it can over-score partially overlapping titles).
+    A weighted blend of token_sort_ratio + token_set_ratio is more robust.
+    """
     nt = _norm(title)
     best, best_score = None, -1
     for cand_title, payload in candidates:
-        score = fuzz.token_set_ratio(nt, _norm(cand_title))
+        c = _norm(cand_title)
+        score_sort = fuzz.token_sort_ratio(nt, c)
+        score_set = fuzz.token_set_ratio(nt, c)
+        score = int(round(0.7 * score_sort + 0.3 * score_set))
         if score > best_score:
             best, best_score = payload, score
     if best and best_score >= threshold:
@@ -897,28 +937,50 @@ def resolve_one(
                 )
 
     # ------------------------------------------------------------
-    # 2) If still not resolved to a published record, try OpenAlex/Crossref by title (to find publisher DOI)
+    # 2) If still not resolved to a published record, try publisher databases
+    #    (very strict title matching to avoid false positives).
     # ------------------------------------------------------------
+    ss_note = ""
+    if (doi or arxiv_id or title) and not ss_paper:
+        ss_note = "S2未命中"
+    elif ss_paper and not s2_looks_published(ss_paper):
+        ss_note = "S2判定预印本"
+
+    def _src(s: str) -> str:
+        return s + (f"; {ss_note}" if ss_note else "")
+
+    # If the user provided a DOI but Semantic Scholar didn't help, Crossref is still authoritative.
     if doi:
-        # If the user provided a DOI but Semantic Scholar didn't help, Crossref is still authoritative.
         try:
             m = crossref_work(doi)
             if m:
                 return BibResult(
                     raw=raw,
                     ok=True,
-                    source="DOI/Crossref(直查)",
+                    source=_src("DOI/Crossref(直查)"),
                     matched_title=((m.get("title") or [""])[0] if m.get("title") else None),
                     bibtex=bibtex_from_crossref(m),
                     ris=ris_from_crossref(m),
                 )
         except Exception as e:
-            return BibResult(raw=raw, ok=False, source="DOI/Crossref(直查)", matched_title=None, bibtex=None, ris=None, message=str(e))
+            return BibResult(
+                raw=raw,
+                ok=False,
+                source=_src("DOI/Crossref(直查)"),
+                matched_title=None,
+                bibtex=None,
+                ris=None,
+                message=str(e),
+            )
+
+    # For title-only inputs, we keep the title matching VERY strict; otherwise it's easy to mis-match
+    # papers that share keywords like "unified/anomaly/novelty/detection".
+    pub_title_threshold = max(threshold, 90)
 
     if title:
         oa = openalex_search(title, rows=10)
         cand = [(it.get("title") or "", it) for it in oa if it.get("title")]
-        best, score = best_title_match_from_candidates(title, cand, threshold=max(70, threshold - 10))
+        best, score = best_title_match_from_candidates(title, cand, threshold=pub_title_threshold)
         if best:
             doi_url = (best.get("doi") or "").strip()
             doi3 = doi_url.replace("https://doi.org/", "").replace("http://doi.org/", "") if doi_url else None
@@ -928,14 +990,14 @@ def resolve_one(
                     return BibResult(
                         raw=raw,
                         ok=True,
-                        source=f"OpenAlex→DOI/Crossref(score={score})",
+                        source=_src(f"OpenAlex→DOI/Crossref(score={score})"),
                         matched_title=((m.get("title") or [""])[0] if m.get("title") else None),
                         bibtex=bibtex_from_crossref(m),
                         ris=ris_from_crossref(m),
                     )
 
     if title:
-        best, score = best_crossref_match(title, threshold=max(65, threshold - 15))
+        best, score = best_crossref_match(title, threshold=pub_title_threshold)
         if best:
             doi4 = (best.get("DOI") or "").strip()
             if doi4 and not is_arxiv_doi(doi4):
@@ -944,7 +1006,7 @@ def resolve_one(
                     return BibResult(
                         raw=raw,
                         ok=True,
-                        source=f"Crossref(标题匹配, score={score})",
+                        source=_src(f"Crossref(标题匹配, score={score})"),
                         matched_title=((m.get("title") or [""])[0] if m.get("title") else None),
                         bibtex=bibtex_from_crossref(m),
                         ris=ris_from_crossref(m),
@@ -1056,6 +1118,8 @@ with st.sidebar:
     export_fmt = st.radio("导出格式", ["BibTeX (.bib)", "RIS (.ris)"], horizontal=True)
     realtime = st.toggle("实时模式（输入停顿后自动检索）", value=False)
     st.caption("提示：实时模式会更频繁调用外部接口。")
+    if "ss_last_status" in st.session_state:
+        st.caption(f"Semantic Scholar 最近状态码：{st.session_state.ss_last_status}")
 
 st.divider()
 st.subheader("arXiv 引用偏好")
@@ -1157,4 +1221,4 @@ if run_now:
                     st.error(r.message or "转换失败")
 
 st.markdown("---")
-st.caption("数据源：Semantic Scholar / arXiv API / Crossref / OpenAlex（吴老二测试中）")
+st.caption("数据源：arXiv API / Crossref / Semantic Scholar / OpenAlex（不抓取 Google Scholar 页面）")
