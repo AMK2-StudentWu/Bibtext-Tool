@@ -37,10 +37,10 @@ def arxiv_base_and_version(arxiv_id: str) -> Tuple[str, str]:
 
 def arxiv_citation_dt(r: arxiv.Result, use_updated: bool):
     """Pick which arXiv date to use for citation: latest(updated) or first submission(published)."""
+    # arxiv.Result has .published (v1 time) and .updated (latest version time)
     if use_updated and getattr(r, "updated", None):
         return r.updated
     return getattr(r, "published", None)
-
 
 
 def _norm(s: str) -> str:
@@ -118,7 +118,6 @@ def extract_arxiv_id(text: str) -> Optional[str]:
     return None
 
 
-
 def guess_title(text: str) -> str:
     """Try to extract a title from messy citation strings."""
     if not text:
@@ -153,6 +152,7 @@ def guess_title(text: str) -> str:
             return cand.strip().rstrip(".")
 
     return t.strip().rstrip(".")
+
 
 
 def make_key(authors: List[str], year: Optional[int], title: str) -> str:
@@ -217,22 +217,29 @@ def arxiv_doi(arxiv_id: str) -> str:
     """arXiv DataCite DOI (best-effort). e.g. 10.48550/arXiv.2110.14051"""
     if not arxiv_id:
         return ""
-    base = arxiv_id.split("v", 1)[0]  # drop version
+    base = re.sub(r"v\d+$", "", arxiv_id, flags=re.IGNORECASE)  # drop version
     return f"10.48550/arXiv.{base}"
 
 
-def format_arxiv_to_ris(r: arxiv.Result, use_updated: bool = True, keep_version: bool = False) -> str:
+def format_arxiv_to_ris(
+    r: arxiv.Result, *, use_updated_year: bool = True, keep_version: bool = False
+) -> str:
     arxiv_short = r.get_short_id()
-    base_id, _ver = arxiv_base_and_version(arxiv_short)
-    arxiv_id = arxiv_short if keep_version else base_id
+    base_id, ver = arxiv_base_and_version(arxiv_short)
+    cite_id = arxiv_short if keep_version else base_id
 
-    dt = arxiv_citation_dt(r, use_updated=use_updated)
+    dt = arxiv_citation_dt(r, use_updated_year)
     year = dt.year if dt else None
-    da = dt.strftime("%Y/%m/%d") if dt else ""
+
+    da = ""
+    if dt:
+        da = dt.strftime("%Y/%m/%d")
 
     primary = getattr(r, "primary_category", None) or ""
     authors = [_name_to_ris_author(a.name) for a in r.authors]
-    url = f"https://arxiv.org/abs/{arxiv_id}"
+
+    url_id = cite_id if keep_version else base_id
+    url = f"https://arxiv.org/abs/{url_id}"
 
     lines = []
     lines.append(_ris_line("TY", "RPRT"))  # report / preprint
@@ -246,14 +253,13 @@ def format_arxiv_to_ris(r: arxiv.Result, use_updated: bool = True, keep_version:
     if da:
         lines.append(_ris_line("DA", da))
     lines.append(_ris_line("JO", "arXiv"))
-    lines.append(_ris_line("T2", f"arXiv:{arxiv_id}"))
+    lines.append(_ris_line("T2", f"arXiv:{cite_id}"))
     if primary:
         lines.append(_ris_line("KW", primary))
-    lines.append(_ris_line("DO", arxiv_doi(arxiv_short)))
+    lines.append(_ris_line("DO", arxiv_doi(base_id)))
     lines.append(_ris_line("UR", url))
     lines.append("ER  -")
     return "\n".join([ln for ln in lines if ln])
-
 
 
 CROSSREF_TYPE_TO_RIS = {
@@ -377,39 +383,39 @@ class BibResult:
 # ==========================
 
 
-def format_arxiv_to_bibtex(r: arxiv.Result, use_updated: bool = True, keep_version: bool = False) -> str:
+def format_arxiv_to_bibtex(
+    r: arxiv.Result, *, use_updated_year: bool = True, keep_version: bool = False
+) -> str:
     authors = [a.name for a in r.authors]
     authors_str = " and ".join(authors)
 
-    dt = arxiv_citation_dt(r, use_updated=use_updated)
-    year = dt.year if dt else None
-
     arxiv_short = r.get_short_id()
-    base_id, _ver = arxiv_base_and_version(arxiv_short)
-    arxiv_id = arxiv_short if keep_version else base_id
+    base_id, ver = arxiv_base_and_version(arxiv_short)
+    cite_id = arxiv_short if keep_version else base_id
+
+    dt = arxiv_citation_dt(r, use_updated_year)
+    year = dt.year if dt else None
 
     key = make_key(authors, year, r.title)
     primary = getattr(r, "primary_category", None) or ""
 
     title = latex_escape(r.title.strip())
-    url = f"https://arxiv.org/abs/{arxiv_id}"
 
-    lines = [f"@misc{{{key},",
-             f"  title={{{{{title}}}}},",
-             f"  author={{{{{latex_escape(authors_str)}}}}},"]
-    if year:
-        lines.append(f"  year={{{{{year}}}}},")
-    lines.extend([
-        f"  eprint={{{{{arxiv_id}}}}},",
-        f"  archivePrefix={{{{arXiv}}}},",
-    ])
-    if primary:
-        lines.append(f"  primaryClass={{{{{primary}}}}},")
-    lines.append(f"  url={{{{{url}}}}},")
-    # remove trailing comma on last field
-    lines[-1] = lines[-1].rstrip(",")
-    lines.append("}")
-    return "\n".join(lines)
+    # arXiv 官方 BibTeX 更倾向使用 canonical URL（不带版本号，https）
+    url_id = cite_id if keep_version else base_id
+    url = f"https://arxiv.org/abs/{url_id}"
+
+    return (
+        f"@misc{{{key},\n"
+        f"  title={{{{{title}}}}},\n"
+        f"  author={{{{{latex_escape(authors_str)}}}}},\n"
+        f"  year={{{{{year}}}}},\n"
+        f"  eprint={{{{{cite_id}}}}},\n"
+        f"  archivePrefix={{{{arXiv}}}},\n"
+        f"  primaryClass={{{{{primary}}}}},\n"
+        f"  url={{{{{url}}}}},\n"
+        f"}}"
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
@@ -612,6 +618,28 @@ def _ua_headers() -> Dict[str, str]:
     return {"User-Agent": ua}
 
 
+def _ss_headers() -> Dict[str, str]:
+    """Headers for Semantic Scholar API.
+
+    Optional API key can be provided via Streamlit secrets:
+      SEMANTIC_SCHOLAR_API_KEY = "..."
+    or via environment variable of the same name.
+    """
+    headers = dict(_ua_headers())
+    api_key = None
+    try:
+        api_key = (st.secrets.get("SEMANTIC_SCHOLAR_API_KEY") or "").strip() or None
+    except Exception:
+        api_key = None
+    if not api_key:
+        import os
+        api_key = (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or "").strip() or None
+    if api_key:
+        # Semantic Scholar docs: header must be "x-api-key" (case-sensitive)
+        headers["x-api-key"] = api_key
+    return headers
+
+
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
 def openalex_search(title: str, rows: int = 8) -> List[Dict]:
     try:
@@ -638,7 +666,7 @@ def semanticscholar_search(title: str, limit: int = 8) -> List[Dict]:
                 "limit": limit,
                 "fields": "title,year,authors,venue,externalIds,url",
             },
-            headers=_ua_headers(),
+            headers=_ss_headers(),
             timeout=15,
         )
         if r.status_code != 200:
@@ -646,6 +674,44 @@ def semanticscholar_search(title: str, limit: int = 8) -> List[Dict]:
         return (r.json() or {}).get("data") or []
     except Exception:
         return []
+
+@st.cache_data(show_spinner=False, ttl=24 * 3600)
+def semanticscholar_get_paper(paper_id: str, fields: str = "title,year,authors,venue,externalIds,url") -> Optional[Dict]:
+    """Direct paper lookup.
+
+    paper_id supports DOI, ArXivId, CorpusId, S2PaperId, or even a paper URL.
+    We recommend passing explicit prefixes like:
+      - DOI:10.1145/...
+      - ARXIV:1706.03762
+    """
+    paper_id = (paper_id or "").strip()
+    if not paper_id:
+        return None
+    try:
+        r = requests.get(
+            f"{SS_BASE}/paper/{paper_id}",
+            params={"fields": fields},
+            headers=_ss_headers(),
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return None
+        return r.json() or None
+    except Exception:
+        return None
+
+
+def semanticscholar_find_doi_for_arxiv(arxiv_id: str) -> Optional[str]:
+    """Try to map an arXiv ID to a publisher DOI via Semantic Scholar."""
+    base, _ver = arxiv_base_and_version(arxiv_id)
+    if not base:
+        return None
+    paper = semanticscholar_get_paper(f"ARXIV:{base}")
+    if not paper:
+        return None
+    ext = paper.get("externalIds") or {}
+    doi = (ext.get("DOI") or "").strip()
+    return doi or None
 
 
 def best_title_match_from_candidates(
@@ -667,7 +733,7 @@ def best_title_match_from_candidates(
 # ==========================
 
 
-def resolve_one(raw: str, threshold: int, use_updated: bool, keep_version: bool) -> BibResult:
+def resolve_one(raw: str, threshold: int, *, arxiv_use_updated_year: bool, arxiv_keep_version: bool, prefer_published: bool) -> BibResult:
     text = (raw or "").strip()
     if not text:
         return BibResult(raw=raw, ok=False, source="", matched_title=None, bibtex=None, ris=None, message="空输入")
@@ -675,10 +741,6 @@ def resolve_one(raw: str, threshold: int, use_updated: bool, keep_version: bool)
     doi = extract_doi(text)
     arxiv_id = extract_arxiv_id(text)
     title = guess_title(text)
-
-    # If it's arXiv's own DataCite DOI (10.48550/arXiv.xxx), prefer arXiv resolution over Crossref.
-    if doi and re.match(r"^10\.48550/arxiv\.", doi, re.IGNORECASE) and arxiv_id:
-        doi = None
 
     # 1) DOI -> Crossref
     if doi:
@@ -692,27 +754,98 @@ def resolve_one(raw: str, threshold: int, use_updated: bool, keep_version: bool)
             except Exception as e:
                 return BibResult(raw=raw, ok=False, source="DOI/Crossref", matched_title=None, bibtex=None, ris=None, message=str(e))
 
-    # 2) arXiv ID -> arXiv
+    # 2) arXiv ID -> (optional) try DOI via Semantic Scholar -> Crossref, else arXiv
     if arxiv_id:
+        if prefer_published:
+            doi_from_s2 = semanticscholar_find_doi_for_arxiv(arxiv_id)
+            if doi_from_s2:
+                m2 = crossref_work(doi_from_s2)
+                if m2:
+                    return BibResult(
+                        raw=raw,
+                        ok=True,
+                        source="arXiv→SemanticScholar→DOI/Crossref",
+                        matched_title=((m2.get("title") or [""])[0] if m2.get("title") else None),
+                        bibtex=bibtex_from_crossref(m2),
+                        ris=ris_from_crossref(m2),
+                    )
+
         r = arxiv_by_id(arxiv_id)
         if r:
-            return BibResult(raw=raw, ok=True, source="arXiv", matched_title=r.title, bibtex=format_arxiv_to_bibtex(r, use_updated=use_updated, keep_version=keep_version), ris=format_arxiv_to_ris(r, use_updated=use_updated, keep_version=keep_version))
+            return BibResult(
+                raw=raw,
+                ok=True,
+                source="arXiv",
+                matched_title=r.title,
+                bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+            )
 
-    # 3) Try arXiv title matching (high precision)
+    # 3) Try title matching.
+    # If prefer_published is ON: try Semantic Scholar first (better chance to land on publisher DOI).
+    # Else: try arXiv first (fast & precise for preprints).
+    if title and prefer_published:
+        ss = semanticscholar_search(title, limit=10)
+        cand = [(it.get("title") or "", it) for it in ss if it.get("title")]
+        best, score = best_title_match_from_candidates(title, cand, threshold=max(70, threshold - 10))
+        if best:
+            ext = best.get("externalIds") or {}
+            doi2 = (ext.get("DOI") or "").strip() or None
+            arx2 = (ext.get("ArXiv") or "").strip() or None
+            if doi2:
+                m = crossref_work(doi2)
+                if m:
+                    return BibResult(
+                        raw=raw,
+                        ok=True,
+                        source=f"SemanticScholar→DOI/Crossref(score={score})",
+                        matched_title=((m.get('title') or [''])[0] if m.get('title') else None),
+                        bibtex=bibtex_from_crossref(m),
+                        ris=ris_from_crossref(m),
+                    )
+            if arx2:
+                r = arxiv_by_id(arx2)
+                if r:
+                    return BibResult(
+                        raw=raw,
+                        ok=True,
+                        source=f"SemanticScholar→arXiv(score={score})",
+                        matched_title=r.title,
+                        bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                        ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                    )
+
+    # arXiv title matching (high precision)
     if title:
         r, score = best_arxiv_match(title, threshold=threshold)
         if r:
+            # When prefer_published is ON, try to upgrade to publisher DOI via S2 before returning arXiv.
+            if prefer_published:
+                doi_from_s2 = semanticscholar_find_doi_for_arxiv(r.get_short_id())
+                if doi_from_s2:
+                    m2 = crossref_work(doi_from_s2)
+                    if m2:
+                        return BibResult(
+                            raw=raw,
+                            ok=True,
+                            source=f"arXiv(标题匹配)→SemanticScholar→DOI/Crossref(score={score})",
+                            matched_title=((m2.get('title') or [''])[0] if m2.get('title') else None),
+                            bibtex=bibtex_from_crossref(m2),
+                            ris=ris_from_crossref(m2),
+                        )
+
             return BibResult(
                 raw=raw,
                 ok=True,
                 source=f"arXiv(标题匹配, score={score})",
                 matched_title=r.title,
-                bibtex=format_arxiv_to_bibtex(r, use_updated=use_updated, keep_version=keep_version),
-                ris=format_arxiv_to_ris(r, use_updated=use_updated, keep_version=keep_version),
+                bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
             )
 
+
     # 4) Semantic Scholar -> (prefer DOI/arXiv)
-    if title:
+    if title and (not prefer_published):
         ss = semanticscholar_search(title, limit=10)
         cand = [(it.get("title") or "", it) for it in ss if it.get("title")]
         best, score = best_title_match_from_candidates(title, cand, threshold=max(70, threshold - 10))
@@ -728,8 +861,8 @@ def resolve_one(raw: str, threshold: int, use_updated: bool, keep_version: bool)
                         ok=True,
                         source=f"SemanticScholar→arXiv(score={score})",
                         matched_title=r.title,
-                        bibtex=format_arxiv_to_bibtex(r, use_updated=use_updated, keep_version=keep_version),
-                        ris=format_arxiv_to_ris(r, use_updated=use_updated, keep_version=keep_version),
+                        bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                        ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
                     )
             if doi2:
                 m = crossref_work(doi2)
@@ -842,11 +975,19 @@ with st.sidebar:
     threshold = st.slider("标题匹配阈值（越高越严格）", min_value=60, max_value=95, value=85, step=1)
     export_fmt = st.radio("导出格式", ["BibTeX (.bib)", "RIS (.ris)"], horizontal=True)
     realtime = st.toggle("实时模式（输入停顿后自动检索）", value=False)
+    st.caption("提示：实时模式会更频繁调用外部接口。")
+    prefer_published = st.toggle("优先正式发表版本（先找 DOI）", value=True)
+    st.caption("开启后：即使输入/匹配到 arXiv，也会优先尝试用 Semantic Scholar 找到 DOI，再走 Crossref 生成更像正式发表的 BibTeX。")
 
-    # arXiv 引用偏好：年份/日期是否使用最新版本、是否保留 vN
-    use_updated = st.toggle("arXiv 引用日期用最新版本（updated）", value=True)
-    keep_version = st.toggle("arXiv eprint/url 保留版本号(vN)", value=False)
-    st.caption("提示：关闭版本号更接近 arXiv 页面 BibTeX；开启版本号更利于复现。")
+st.divider()
+st.subheader("arXiv 引用偏好")
+arxiv_year_mode = st.radio(
+    "年份/日期取值",
+    ["使用最新版本(updated)", "使用首次提交(published)"],
+    index=0,
+)
+arxiv_use_updated_year = arxiv_year_mode.startswith("使用最新版本")
+arxiv_keep_version = st.toggle("eprint/url 保留版本号(vN)", value=False)
 
 
 raw_text = st.text_area(
@@ -897,7 +1038,7 @@ if run_now:
         st.warning("请输入内容。")
     else:
         with st.spinner("正在检索…"):
-            results = [resolve_one(e, threshold=threshold, use_updated=use_updated, keep_version=keep_version) for e in entries]
+            results = [resolve_one(e, threshold=threshold, arxiv_use_updated_year=arxiv_use_updated_year, arxiv_keep_version=arxiv_keep_version, prefer_published=prefer_published) for e in entries]
 
         is_ris = export_fmt.startswith("RIS")
         ok_out = [ (r.ris if is_ris else r.bibtex) for r in results if r.ok and (r.ris if is_ris else r.bibtex) ]
