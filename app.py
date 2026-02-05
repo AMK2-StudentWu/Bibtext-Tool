@@ -37,10 +37,10 @@ def arxiv_base_and_version(arxiv_id: str) -> Tuple[str, str]:
 
 def arxiv_citation_dt(r: arxiv.Result, use_updated: bool):
     """Pick which arXiv date to use for citation: latest(updated) or first submission(published)."""
-    # arxiv.Result has .published (v1 time) and .updated (latest version time)
     if use_updated and getattr(r, "updated", None):
         return r.updated
     return getattr(r, "published", None)
+
 
 
 def _norm(s: str) -> str:
@@ -73,12 +73,21 @@ def extract_doi(text: str) -> Optional[str]:
 
 
 def extract_arxiv_id(text: str) -> Optional[str]:
+    """Extract arXiv id from a string.
+
+    Supports:
+    - arXiv:2310.18961(v2)
+    - https://arxiv.org/abs/2310.18961(v2) or /pdf/...
+    - raw id: 2310.18961(v2)
+    - DataCite DOI for arXiv: 10.48550/arXiv.2310.18961(v2)
+    """
     if not text:
         return None
-# DataCite DOI for arXiv: 10.48550/arXiv.2310.18961 (optionally with vN)
-m = re.search(r"10\.48550\s*/\s*arxiv\.([0-9]{4}\.[0-9]{4,5})(v\d+)?", text, re.IGNORECASE)
-if m:
-    return m.group(1) + (m.group(2) or "")
+
+    # DataCite DOI for arXiv: 10.48550/arXiv.2310.18961 (optionally with vN)
+    m = re.search(r"10\.48550\s*/\s*arxiv\.([0-9]{4}\.[0-9]{4,5})(v\d+)?", text, re.IGNORECASE)
+    if m:
+        return m.group(1) + (m.group(2) or "")
 
     # arXiv:xxxx.xxxxx
     m = re.search(r"arxiv\s*:\s*([^\s]+)", text, re.IGNORECASE)
@@ -107,6 +116,7 @@ if m:
     if m:
         return m.group(0)
     return None
+
 
 
 def guess_title(text: str) -> str:
@@ -207,29 +217,22 @@ def arxiv_doi(arxiv_id: str) -> str:
     """arXiv DataCite DOI (best-effort). e.g. 10.48550/arXiv.2110.14051"""
     if not arxiv_id:
         return ""
-    base = re.sub(r"v\d+$", "", arxiv_id, flags=re.IGNORECASE)  # drop version
+    base = arxiv_id.split("v", 1)[0]  # drop version
     return f"10.48550/arXiv.{base}"
 
 
-def format_arxiv_to_ris(
-    r: arxiv.Result, *, use_updated_year: bool = True, keep_version: bool = False
-) -> str:
+def format_arxiv_to_ris(r: arxiv.Result, use_updated: bool = True, keep_version: bool = False) -> str:
     arxiv_short = r.get_short_id()
-    base_id, ver = arxiv_base_and_version(arxiv_short)
-    cite_id = arxiv_short if keep_version else base_id
+    base_id, _ver = arxiv_base_and_version(arxiv_short)
+    arxiv_id = arxiv_short if keep_version else base_id
 
-    dt = arxiv_citation_dt(r, use_updated_year)
+    dt = arxiv_citation_dt(r, use_updated=use_updated)
     year = dt.year if dt else None
-
-    da = ""
-    if dt:
-        da = dt.strftime("%Y/%m/%d")
+    da = dt.strftime("%Y/%m/%d") if dt else ""
 
     primary = getattr(r, "primary_category", None) or ""
     authors = [_name_to_ris_author(a.name) for a in r.authors]
-
-    url_id = cite_id if keep_version else base_id
-    url = f"https://arxiv.org/abs/{url_id}"
+    url = f"https://arxiv.org/abs/{arxiv_id}"
 
     lines = []
     lines.append(_ris_line("TY", "RPRT"))  # report / preprint
@@ -243,13 +246,14 @@ def format_arxiv_to_ris(
     if da:
         lines.append(_ris_line("DA", da))
     lines.append(_ris_line("JO", "arXiv"))
-    lines.append(_ris_line("T2", f"arXiv:{cite_id}"))
+    lines.append(_ris_line("T2", f"arXiv:{arxiv_id}"))
     if primary:
         lines.append(_ris_line("KW", primary))
-    lines.append(_ris_line("DO", arxiv_doi(base_id)))
+    lines.append(_ris_line("DO", arxiv_doi(arxiv_short)))
     lines.append(_ris_line("UR", url))
     lines.append("ER  -")
     return "\n".join([ln for ln in lines if ln])
+
 
 
 CROSSREF_TYPE_TO_RIS = {
@@ -373,39 +377,39 @@ class BibResult:
 # ==========================
 
 
-def format_arxiv_to_bibtex(
-    r: arxiv.Result, *, use_updated_year: bool = True, keep_version: bool = False
-) -> str:
+def format_arxiv_to_bibtex(r: arxiv.Result, use_updated: bool = True, keep_version: bool = False) -> str:
     authors = [a.name for a in r.authors]
     authors_str = " and ".join(authors)
 
-    arxiv_short = r.get_short_id()
-    base_id, ver = arxiv_base_and_version(arxiv_short)
-    cite_id = arxiv_short if keep_version else base_id
-
-    dt = arxiv_citation_dt(r, use_updated_year)
+    dt = arxiv_citation_dt(r, use_updated=use_updated)
     year = dt.year if dt else None
+
+    arxiv_short = r.get_short_id()
+    base_id, _ver = arxiv_base_and_version(arxiv_short)
+    arxiv_id = arxiv_short if keep_version else base_id
 
     key = make_key(authors, year, r.title)
     primary = getattr(r, "primary_category", None) or ""
 
     title = latex_escape(r.title.strip())
+    url = f"https://arxiv.org/abs/{arxiv_id}"
 
-    # arXiv 官方 BibTeX 更倾向使用 canonical URL（不带版本号，https）
-    url_id = cite_id if keep_version else base_id
-    url = f"https://arxiv.org/abs/{url_id}"
-
-    return (
-        f"@misc{{{key},\n"
-        f"  title={{{{{title}}}}},\n"
-        f"  author={{{{{latex_escape(authors_str)}}}}},\n"
-        f"  year={{{{{year}}}}},\n"
-        f"  eprint={{{{{cite_id}}}}},\n"
-        f"  archivePrefix={{{{arXiv}}}},\n"
-        f"  primaryClass={{{{{primary}}}}},\n"
-        f"  url={{{{{url}}}}},\n"
-        f"}}"
-    )
+    lines = [f"@misc{{{key},",
+             f"  title={{{{{title}}}}},",
+             f"  author={{{{{latex_escape(authors_str)}}}}},"]
+    if year:
+        lines.append(f"  year={{{{{year}}}}},")
+    lines.extend([
+        f"  eprint={{{{{arxiv_id}}}}},",
+        f"  archivePrefix={{{{arXiv}}}},",
+    ])
+    if primary:
+        lines.append(f"  primaryClass={{{{{primary}}}}},")
+    lines.append(f"  url={{{{{url}}}}},")
+    # remove trailing comma on last field
+    lines[-1] = lines[-1].rstrip(",")
+    lines.append("}")
+    return "\n".join(lines)
 
 
 @st.cache_data(show_spinner=False, ttl=24 * 3600)
@@ -663,7 +667,7 @@ def best_title_match_from_candidates(
 # ==========================
 
 
-def resolve_one(raw: str, threshold: int, *, arxiv_use_updated_year: bool, arxiv_keep_version: bool) -> BibResult:
+def resolve_one(raw: str, threshold: int, use_updated: bool, keep_version: bool) -> BibResult:
     text = (raw or "").strip()
     if not text:
         return BibResult(raw=raw, ok=False, source="", matched_title=None, bibtex=None, ris=None, message="空输入")
@@ -671,6 +675,10 @@ def resolve_one(raw: str, threshold: int, *, arxiv_use_updated_year: bool, arxiv
     doi = extract_doi(text)
     arxiv_id = extract_arxiv_id(text)
     title = guess_title(text)
+
+    # If it's arXiv's own DataCite DOI (10.48550/arXiv.xxx), prefer arXiv resolution over Crossref.
+    if doi and re.match(r"^10\.48550/arxiv\.", doi, re.IGNORECASE) and arxiv_id:
+        doi = None
 
     # 1) DOI -> Crossref
     if doi:
@@ -688,7 +696,7 @@ def resolve_one(raw: str, threshold: int, *, arxiv_use_updated_year: bool, arxiv
     if arxiv_id:
         r = arxiv_by_id(arxiv_id)
         if r:
-            return BibResult(raw=raw, ok=True, source="arXiv", matched_title=r.title, bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version), ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version))
+            return BibResult(raw=raw, ok=True, source="arXiv", matched_title=r.title, bibtex=format_arxiv_to_bibtex(r, use_updated=use_updated, keep_version=keep_version), ris=format_arxiv_to_ris(r, use_updated=use_updated, keep_version=keep_version))
 
     # 3) Try arXiv title matching (high precision)
     if title:
@@ -699,8 +707,8 @@ def resolve_one(raw: str, threshold: int, *, arxiv_use_updated_year: bool, arxiv
                 ok=True,
                 source=f"arXiv(标题匹配, score={score})",
                 matched_title=r.title,
-                bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
-                ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                bibtex=format_arxiv_to_bibtex(r, use_updated=use_updated, keep_version=keep_version),
+                ris=format_arxiv_to_ris(r, use_updated=use_updated, keep_version=keep_version),
             )
 
     # 4) Semantic Scholar -> (prefer DOI/arXiv)
@@ -720,8 +728,8 @@ def resolve_one(raw: str, threshold: int, *, arxiv_use_updated_year: bool, arxiv
                         ok=True,
                         source=f"SemanticScholar→arXiv(score={score})",
                         matched_title=r.title,
-                        bibtex=format_arxiv_to_bibtex(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
-                        ris=format_arxiv_to_ris(r, use_updated_year=arxiv_use_updated_year, keep_version=arxiv_keep_version),
+                        bibtex=format_arxiv_to_bibtex(r, use_updated=use_updated, keep_version=keep_version),
+                        ris=format_arxiv_to_ris(r, use_updated=use_updated, keep_version=keep_version),
                     )
             if doi2:
                 m = crossref_work(doi2)
@@ -834,17 +842,11 @@ with st.sidebar:
     threshold = st.slider("标题匹配阈值（越高越严格）", min_value=60, max_value=95, value=85, step=1)
     export_fmt = st.radio("导出格式", ["BibTeX (.bib)", "RIS (.ris)"], horizontal=True)
     realtime = st.toggle("实时模式（输入停顿后自动检索）", value=False)
-    st.caption("提示：实时模式会更频繁调用外部接口。")
 
-st.divider()
-st.subheader("arXiv 引用偏好")
-arxiv_year_mode = st.radio(
-    "年份/日期取值",
-    ["使用最新版本(updated)", "使用首次提交(published)"],
-    index=0,
-)
-arxiv_use_updated_year = arxiv_year_mode.startswith("使用最新版本")
-arxiv_keep_version = st.toggle("eprint/url 保留版本号(vN)", value=False)
+    # arXiv 引用偏好：年份/日期是否使用最新版本、是否保留 vN
+    use_updated = st.toggle("arXiv 引用日期用最新版本（updated）", value=True)
+    keep_version = st.toggle("arXiv eprint/url 保留版本号(vN)", value=False)
+    st.caption("提示：关闭版本号更接近 arXiv 页面 BibTeX；开启版本号更利于复现。")
 
 
 raw_text = st.text_area(
@@ -895,7 +897,7 @@ if run_now:
         st.warning("请输入内容。")
     else:
         with st.spinner("正在检索…"):
-            results = [resolve_one(e, threshold=threshold, arxiv_use_updated_year=arxiv_use_updated_year, arxiv_keep_version=arxiv_keep_version) for e in entries]
+            results = [resolve_one(e, threshold=threshold, use_updated=use_updated, keep_version=keep_version) for e in entries]
 
         is_ris = export_fmt.startswith("RIS")
         ok_out = [ (r.ris if is_ris else r.bibtex) for r in results if r.ok and (r.ris if is_ris else r.bibtex) ]
